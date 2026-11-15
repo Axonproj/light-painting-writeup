@@ -63,10 +63,10 @@ right in this picture.
 
 <br>
 
-<p align="center"><a href="../images/full/cube_turn_half_v2.mp4"><img src="../images/thumbs/cube_turn_half_v2.jpg" width="500" alt="Cube, a frame of the animation"></a></p>
+<p align="center"><img src="../images/full/cube_turn.gif" width="500" alt="Cube, the animation"></p>
 
 **_Cube_.** An animation of a wireframe cube turning, in strong perspective. Every frame is its own light painting, drawn and
 photographed one at a time with the cube turned a little further each time,
-then the frames are joined into a video. Click the picture to play it.
+then the frames are joined into an animation.
 
 [← The Plotting Process](the_plotting_process.md) · [Contents](../README.md) · [Next: The Sketching App →](the_sketching_app.md)
