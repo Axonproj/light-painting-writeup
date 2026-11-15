@@ -59,4 +59,11 @@ The rest are helpers the Python programs use: `outdirs.py`,
 `photo_hlines.py`, `rate_test.py`, `harmonograph3d.py`, `picmeta.py`
 and `undistort.py`.
 
-The code is under the MIT licence: see [LICENSE](LICENSE).
+## Firmware
+
+The [firmware](firmware/) folder has the code for the plotter's three
+microcontrollers: the WiFi bridge, the LED pen carrier, and the
+changes to GRBL on the Arduino Nano.
+
+The code is under the MIT licence, apart from the GRBL patch, which is
+GPL v3 as GRBL is: see [LICENSE](LICENSE).

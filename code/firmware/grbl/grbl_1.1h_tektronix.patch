@@ -1,0 +1,338 @@
+diff --git a/config.h b/config.h
+index f48d958..224e754 100644
+--- a/config.h
++++ b/config.h
+@@ -102,15 +102,9 @@
+ // on separate pin, but homed in one cycle. Also, it should be noted that the function of hard limits
+ // will not be affected by pin sharing.
+ // NOTE: Defaults are set for a traditional 3-axis CNC machine. Z-axis first to clear, followed by X & Y.
+-#define HOMING_CYCLE_0 (1<<Z_AXIS)                // REQUIRED: First move Z to clear workspace.
+-#define HOMING_CYCLE_1 ((1<<X_AXIS)|(1<<Y_AXIS))  // OPTIONAL: Then move X,Y at the same time.
+-// #define HOMING_CYCLE_2                         // OPTIONAL: Uncomment and add axes mask to enable
+-
+-// NOTE: The following are two examples to setup homing for 2-axis machines.
+-// #define HOMING_CYCLE_0 ((1<<X_AXIS)|(1<<Y_AXIS))  // NOT COMPATIBLE WITH COREXY: Homes both X-Y in one cycle. 
+-
+-// #define HOMING_CYCLE_0 (1<<X_AXIS)  // COREXY COMPATIBLE: First home X
+-// #define HOMING_CYCLE_1 (1<<Y_AXIS)  // COREXY COMPATIBLE: Then home Y
++// Tektronix 4662: 2-axis plotter, home X first (toward X-max), then Y (toward Y-min).
++#define HOMING_CYCLE_0 (1<<X_AXIS)
++#define HOMING_CYCLE_1 (1<<Y_AXIS)
+ 
+ // Number of homing cycles performed after when the machine initially jogs to limit switches.
+ // This help in preventing overshoot and should improve repeatability. This value should be one or
+diff --git a/cpu_map.h b/cpu_map.h
+index 9f43a3f..8e118a8 100644
+--- a/cpu_map.h
++++ b/cpu_map.h
+@@ -144,13 +144,14 @@
+     // #define SPINDLE_TCCRB_INIT_MASK   (1<<CS20)               // Disable prescaler -> 62.5kHz
+     // #define SPINDLE_TCCRB_INIT_MASK   (1<<CS21)               // 1/8 prescaler -> 7.8kHz (Used in v0.9)
+     // #define SPINDLE_TCCRB_INIT_MASK   ((1<<CS21) | (1<<CS20)) // 1/32 prescaler -> 1.96kHz
+-    #define SPINDLE_TCCRB_INIT_MASK      (1<<CS22)               // 1/64 prescaler -> 0.98kHz (J-tech laser)
++    // Tektronix 4662: no prescaler -> 62.5kHz for pen solenoid (high freq prevents buzzing).
++    #define SPINDLE_TCCRB_INIT_MASK   (1<<CS20)               // Disable prescaler -> 62.5kHz
+ 
+     // NOTE: On the 328p, these must be the same as the SPINDLE_ENABLE settings.
+     #define SPINDLE_PWM_DDR   DDRB
+     #define SPINDLE_PWM_PORT  PORTB
+     #define SPINDLE_PWM_BIT   3    // Uno Digital Pin 11
+-  
++
+   #else
+ 
+     // Dual axis feature requires an independent step pulse pin to operate. The independent direction pin is not 
+diff --git a/gcode.c b/gcode.c
+index 57e31e5..426d243 100644
+--- a/gcode.c
++++ b/gcode.c
+@@ -280,6 +280,9 @@ uint8_t gc_execute_line(char *line)
+               gc_block.modal.override = OVERRIDE_PARKING_MOTION;
+               break;
+           #endif
++          case 62:
++            word_bit = MODAL_GROUP_M_COLOUR; // [M62 Pn] LED colour change
++            break;
+           default: FAIL(STATUS_GCODE_UNSUPPORTED_COMMAND); // [Unsupported M command]
+         }
+ 
+@@ -451,6 +454,14 @@ uint8_t gc_execute_line(char *line)
+     bit_false(value_words,bit(WORD_P));
+   }
+ 
++  // [M62 Colour ]: P word required. Low 24 bits = RGB; bit 24 = preload flag
++  // (arm colour on the carrier but leave the LED dark). Range 0-33554431.
++  if (bit_istrue(command_words,bit(MODAL_GROUP_M_COLOUR))) {
++    if (bit_isfalse(value_words,bit(WORD_P))) { FAIL(STATUS_GCODE_VALUE_WORD_MISSING); }
++    if (gc_block.values.p < 0.0 || gc_block.values.p > 33554431.0) { FAIL(STATUS_GCODE_INVALID_TARGET); }
++    bit_false(value_words,bit(WORD_P));
++  }
++
+   // [11. Set active plane ]: N/A
+   switch (gc_block.modal.plane_select) {
+     case PLANE_SELECT_XY:
+@@ -945,6 +956,21 @@ uint8_t gc_execute_line(char *line)
+     // rather than gc_state, is used to manage laser state for non-laser motions.
+     spindle_sync(gc_block.modal.spindle, pl_data->spindle_speed);
+     gc_state.modal.spindle = gc_block.modal.spindle;
++    // M5 (pen up): drop any colour still waiting for a motion block, and tell the pen
++    // carrier to go dark. This goes out before the ok, so the bridge sees it before
++    // plotter.pl can send !espnow.
++    // Only gc_state.colour may be cleared here. It is the PARSE-stage pending colour,
++    // which is what "flush" is meant to discard. sys.pending_colour is a different
++    // stage: the stepper ISR sets it when a block STARTS EXECUTING, for the main loop
++    // to emit as [C:n]. Clearing that from parse context destroys the [C:n] of a block
++    // already under way — and since plotter.pl pipelines the next M5 immediately after
++    // a G1, this M5 is parsed while that stroke is still drawing. The stroke then runs
++    // its whole length dark, because the bridge is left holding an off and dutifully
++    // resends it. That was a real, sporadic whole-line dropout, not a radio fault.
++    if (gc_state.modal.spindle == SPINDLE_DISABLE) {
++      gc_state.colour = 0;
++      printPgmString(PSTR("[C:0]\r\n"));
++    }
+   }
+   pl_data->condition |= gc_state.modal.spindle; // Set condition flag for planner use.
+ 
+@@ -957,6 +983,12 @@ uint8_t gc_execute_line(char *line)
+   }
+   pl_data->condition |= gc_state.modal.coolant; // Set condition flag for planner use.
+ 
++  // [8b. LED colour control (M62 Pn) ]:
++  if (bit_istrue(command_words,bit(MODAL_GROUP_M_COLOUR))) {
++    gc_state.colour = (uint32_t)gc_block.values.p; // Store colour; consumed by next motion block.
++    if (gc_state.colour == 0) { gc_state.colour = 0xFFFFFFFF; } // Reserve 0 for "no pending colour"; use 0xFFFFFFFF for black.
++  }
++
+   // [9. Override control ]: NOT SUPPORTED. Always enabled. Except for a Grbl-only parking control.
+   #ifdef ENABLE_PARKING_OVERRIDE_CONTROL
+     if (gc_state.modal.override != gc_block.modal.override) {
+@@ -1045,9 +1077,13 @@ uint8_t gc_execute_line(char *line)
+   // [20. Motion modes ]:
+   // NOTE: Commands G10,G28,G30,G92 lock out and prevent axis words from use in motion modes.
+   // Enter motion modes only if there are axis words or a motion mode command word in the block.
++
+   gc_state.modal.motion = gc_block.modal.motion;
+   if (gc_state.modal.motion != MOTION_MODE_NONE) {
+     if (axis_command == AXIS_COMMAND_MOTION_MODE) {
++      // Transfer pending M62 LED colour to planner data for this motion block, then consume it.
++      pl_data->colour = gc_state.colour;
++      gc_state.colour = 0;
+       uint8_t gc_update_pos = GC_UPDATE_POS_TARGET;
+       if (gc_state.modal.motion == MOTION_MODE_LINEAR) {
+         mc_line(gc_block.values.xyz, pl_data);
+diff --git a/gcode.h b/gcode.h
+index 6cdc61b..4d928b7 100644
+--- a/gcode.h
++++ b/gcode.h
+@@ -45,6 +45,7 @@
+ #define MODAL_GROUP_M7 12 // [M3,M4,M5] Spindle turning
+ #define MODAL_GROUP_M8 13 // [M7,M8,M9] Coolant control
+ #define MODAL_GROUP_M9 14 // [M56] Override control
++#define MODAL_GROUP_M_COLOUR 15 // [M62] LED colour change (plotter extension)
+ 
+ // Define command actions for within execution-type modal groups (motion, stopping, non-modal). Used
+ // internally by the parser to know which command to execute.
+@@ -217,6 +218,7 @@ typedef struct {
+   float feed_rate;              // Millimeters/min
+   uint8_t tool;                 // Tracks tool number. NOT USED.
+   int32_t line_number;          // Last line number sent
++  uint32_t colour;              // Pending LED colour for next motion block (M62 Pn, 24-bit RGB). 0 = no change.
+ 
+   float position[N_AXIS];       // Where the interpreter considers the tool to be at this point in the code
+ 
+diff --git a/grbl.h b/grbl.h
+index 89db829..dd8e781 100644
+--- a/grbl.h
++++ b/grbl.h
+@@ -23,7 +23,7 @@
+ 
+ // Grbl versioning system
+ #define GRBL_VERSION "1.1h"
+-#define GRBL_VERSION_BUILD "20190825"
++#define GRBL_VERSION_BUILD "20190830"
+ 
+ // Define standard libraries used by Grbl.
+ #include <avr/io.h>
+diff --git a/main.c b/main.c
+index 96f2aba..66fa7c3 100644
+--- a/main.c
++++ b/main.c
+@@ -84,6 +84,15 @@ int main(void)
+     sys_rt_exec_motion_override = 0;
+     sys_rt_exec_accessory_override = 0;
+ 
++    // Flash LED to confirm reset.
++    DDRB |= (1 << 5);   // Pin 13 = PB5, set as output.
++    for (uint8_t i = 0; i < 3; i++) {
++      PORTB |= (1 << 5);
++      _delay_ms(80);
++      PORTB &= ~(1 << 5);
++      _delay_ms(80);
++    }
++
+     // Reset Grbl primary systems.
+     serial_reset_read_buffer(); // Clear serial read buffer
+     gc_init(); // Set g-code parser to default state
+diff --git a/planner.c b/planner.c
+index 49ff722..37b009c 100644
+--- a/planner.c
++++ b/planner.c
+@@ -318,6 +318,7 @@ uint8_t plan_buffer_line(float *target, plan_line_data_t *pl_data)
+   plan_block_t *block = &block_buffer[block_buffer_head];
+   memset(block,0,sizeof(plan_block_t)); // Zero all block values.
+   block->condition = pl_data->condition;
++  block->colour = pl_data->colour;
+   #ifdef VARIABLE_SPINDLE
+     block->spindle_speed = pl_data->spindle_speed;
+   #endif
+diff --git a/planner.h b/planner.h
+index e3751e1..fd1cd1c 100644
+--- a/planner.h
++++ b/planner.h
+@@ -83,6 +83,8 @@ typedef struct {
+     // Stored spindle speed data used by spindle overrides and resuming methods.
+     float spindle_speed;    // Block spindle speed. Copied from pl_line_data.
+   #endif
++
++  uint32_t colour;          // LED colour for this block (M62 Pn, 24-bit RGB). 0 = no change.
+ } plan_block_t;
+ 
+ 
+@@ -94,6 +96,7 @@ typedef struct {
+   #ifdef USE_LINE_NUMBERS
+     int32_t line_number;    // Desired line number to report when executing.
+   #endif
++  uint32_t colour;          // LED colour for this motion (M62 Pn, 24-bit RGB). 0 = no change.
+ } plan_line_data_t;
+ 
+ 
+diff --git a/protocol.c b/protocol.c
+index 08ea48b..f9c0fe4 100644
+--- a/protocol.c
++++ b/protocol.c
+@@ -20,6 +20,7 @@
+ */
+ 
+ #include "grbl.h"
++#include <util/atomic.h>   // ATOMIC_BLOCK for the ISR-shared sys.pending_colour
+ 
+ // Define line flags. Includes comment type tracking and line overflow detection.
+ #define LINE_FLAG_OVERFLOW bit(0)
+@@ -237,6 +238,29 @@ void protocol_exec_rt_system()
+     system_clear_exec_alarm(); // Clear alarm
+   }
+ 
++  // Emit pending LED colour change message [C:n] for ESP32-C3 to forward via ESP-NOW.
++  // n is 24-bit RGB (0=black/off, 1-16777215=colour). 0xFFFFFFFF is internal sentinel for P=0.
++  // sys.pending_colour is written by the stepper ISR (stepper.c) and read here in the
++  // main loop. It is 32-bit on an 8-bit AVR, so the read-and-clear is four instructions
++  // and the ISR can land in the middle of it — losing a colour change, or worse,
++  // returning a torn value that would put a wrong colour on the carrier. Take it under
++  // ATOMIC_BLOCK. The unguarded test below is only a cheap hint: a torn read that comes
++  // back zero merely defers the emit by one loop pass, and the real value is re-read
++  // atomically. The ISR side needs no guard — main-loop code cannot preempt an ISR.
++  if (sys.pending_colour) {
++    uint32_t c;
++    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
++      c = sys.pending_colour;
++      sys.pending_colour = 0;
++    }
++    if (c) {
++      if (c == 0xFFFFFFFF) { c = 0; } // P=0 (black) was stored as 0xFFFFFFFF to distinguish from "no change"
++      printPgmString(PSTR("[C:"));
++      print_uint32_base10(c);
++      printPgmString(PSTR("]\r\n"));
++    }
++  }
++
+   rt_exec = sys_rt_exec_state; // Copy volatile sys_rt_exec_state.
+   if (rt_exec) {
+ 
+diff --git a/report.c b/report.c
+index 666608a..000836f 100644
+--- a/report.c
++++ b/report.c
+@@ -578,7 +578,7 @@ void report_realtime_status()
+             if (bit_istrue(lim_pin_state,bit(Y_AXIS))) { serial_write('Y'); }
+           #endif
+           #if (DUAL_AXIS_SELECT == Y_AXIS)
+-            if (bit_istrue(lim_pin_state,bit(X_AXIS))) { serial_write('X'); 
++            if (bit_istrue(lim_pin_state,bit(X_AXIS))) { serial_write('X'); }
+             if (bit_istrue(lim_pin_state,(bit(Y_AXIS)|bit(N_AXIS)))) { serial_write('Y'); }
+           #endif
+           if (bit_istrue(lim_pin_state,bit(Z_AXIS))) { serial_write('Z'); }
+diff --git a/stepper.c b/stepper.c
+index 8e0b151..b4ab988 100644
+--- a/stepper.c
++++ b/stepper.c
+@@ -73,6 +73,7 @@ typedef struct {
+   #ifdef VARIABLE_SPINDLE
+     uint8_t is_pwm_rate_adjusted; // Tracks motions that require constant laser power/rate
+   #endif
++  uint32_t colour; // LED colour for this block (M62 Pn, 24-bit RGB). 0 = no change.
+ } st_block_t;
+ static st_block_t st_block_buffer[SEGMENT_BUFFER_SIZE-1];
+ 
+@@ -371,6 +372,9 @@ ISR(TIMER1_COMPA_vect)
+ 
+         // Initialize Bresenham line and distance counters
+         st.counter_x = st.counter_y = st.counter_z = (st.exec_block->step_event_count >> 1);
++
++        // Signal LED colour change for this block to the protocol main loop.
++        if (st.exec_block->colour) { sys.pending_colour = st.exec_block->colour; }
+       }
+       st.dir_outbits = st.exec_block->direction_bits ^ dir_port_invert_mask;
+       #ifdef ENABLE_DUAL_AXIS
+@@ -700,6 +704,7 @@ void st_prep_buffer()
+         // segment buffer finishes the prepped block, but the stepper ISR is still executing it.
+         st_prep_block = &st_block_buffer[prep.st_block_index];
+         st_prep_block->direction_bits = pl_block->direction_bits;
++        st_prep_block->colour = pl_block->colour;
+         #ifdef ENABLE_DUAL_AXIS
+           #if (DUAL_AXIS_SELECT == X_AXIS)
+             if (st_prep_block->direction_bits & (1<<X_DIRECTION_BIT)) { 
+@@ -738,16 +743,17 @@ void st_prep_buffer()
+         
+         #ifdef VARIABLE_SPINDLE
+           // Setup laser mode variables. PWM rate adjusted motions will always complete a motion with the
+-          // spindle off. 
++          // spindle off.
+           st_prep_block->is_pwm_rate_adjusted = false;
+           if (settings.flags & BITFLAG_LASER_MODE) {
+-            if (pl_block->condition & PL_COND_FLAG_SPINDLE_CCW) { 
++            if (pl_block->condition & PL_COND_FLAG_SPINDLE_CCW) {
+               // Pre-compute inverse programmed rate to speed up PWM updating per step segment.
+               prep.inv_rate = 1.0/pl_block->programmed_rate;
+-              st_prep_block->is_pwm_rate_adjusted = true; 
++              st_prep_block->is_pwm_rate_adjusted = true;
+             }
+           }
+         #endif
++
+       }
+ 
+ 			/* ---------------------------------------------------------------------------------
+diff --git a/system.c b/system.c
+index 55e6c40..b6fbce1 100644
+--- a/system.c
++++ b/system.c
+@@ -335,6 +335,7 @@ uint8_t system_check_travel_limits(float *target)
+ {
+   uint8_t idx;
+   for (idx=0; idx<N_AXIS; idx++) {
++    if (idx == Z_AXIS) { continue; } // Skip Z — not used on 2-axis plotter
+     #ifdef HOMING_FORCE_SET_ORIGIN
+       // When homing forced set origin is enabled, soft limits checks need to account for directionality.
+       // NOTE: max_travel is stored as negative
+diff --git a/system.h b/system.h
+index cfc9273..d1e146f 100644
+--- a/system.h
++++ b/system.h
+@@ -147,6 +147,7 @@ typedef struct {
+   #ifdef VARIABLE_SPINDLE
+     float spindle_speed;
+   #endif
++  volatile uint32_t pending_colour; // LED colour pending emit (M62 Pn, 24-bit RGB). 0 = nothing pending.
+ } system_t;
+ extern system_t sys;
+ 
