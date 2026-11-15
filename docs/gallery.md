@@ -63,7 +63,7 @@ right in this picture.
 
 <br>
 
-<p align="center"><img src="../images/full/cube_turn.gif" width="500" alt="Cube, the animation"></p>
+https://github.com/user-attachments/assets/3bd83312-7457-46fc-83f6-f10f90993eef
 
 **_Cube_.** An animation of a wireframe cube turning, in strong perspective. Every frame is its own light painting, drawn and
 photographed one at a time with the cube turned a little further each time,
