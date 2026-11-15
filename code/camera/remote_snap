@@ -1,0 +1,492 @@
+#!/usr/bin/env bash
+#
+# remote_snap — take a photo with the Canon EOS 700D (gphoto2, on the Pi
+# "plotcam"; since 2026-11-04, see "EOS 700D" below) or the CHDK-equipped
+# Canon A570 IS over USB (PTP), whichever is connected, and save it to ~/projects/plotter/remote_pics/NAME_NNN.jpeg (with -name=NAME;
+# NNN counts up per name) or YYYYMMDDHHMMSS.jpeg. Prints the path on stdout.
+#
+# The camera must be: plugged in, powered on, ENUMERATED (connect it while in
+# PLAYBACK mode), and CHDK "Enable Remote" OFF. remoteshoot streams the frame
+# straight to disk — the SD card is not written.
+#
+# Usage: remote_snap [-name=NAME] [-dark] [-tv=S] [-av=F] [-sv=ISO] [-nd=in|out]
+#                    [-focus=MM] [-dng] [-open] [-probe] [-meter]
+#   e.g. remote_snap                 (camera defaults)
+#        remote_snap -tv=8           (8-second exposure)
+#        remote_snap -tv=1/250 -av=8 (1/250s at f/8)
+#        remote_snap -av=2.8         (wide open)
+#        remote_snap -focus=1000        (manual focus at 1 m)
+#        remote_snap -tv=30 -focus=800  (30s, focus 0.8 m — a light-paint frame)
+#        remote_snap -probe             (exit 0 once the camera is idle, 1 if not)
+#        remote_snap -meter             (print the scene brightness: "bv96 N", 96 per stop)
+#        remote_snap -dng -tv=60        (also keep the RAW frame: NAME.cr2 (700D) or NAME.dng (A570) beside NAME.jpeg)
+#        remote_snap -name=spiral -tv=15   (-> spiral_001.jpeg, then spiral_002...)
+#        remote_snap -name=v2 -dark        (-> v2_003_dark.jpeg: a background frame)
+#        remote_snap -open -tv=4           (open the frame in Preview when it lands)
+#   Output dir: $REMOTE_PICS_DIR, else ~/projects/plotter/remote_pics
+# tv/av are CHDK overrides and work in any mode. -focus switches the camera to
+# MANUAL FOCUS itself; without -focus it is switched back to autofocus. ISO/WB
+# must be pinned on the camera (ISO 80, WB=Daylight, flash off in M mode).
+# Every shot first sets the camera clock from the Mac's, so EXIF dates are real
+# (the A570 resets to 1980 at each power-on).
+
+set -uo pipefail
+
+CHDKPTP_DIR="$HOME/projects/chdkptp-build/simonswine"
+OUT_DIR="${REMOTE_PICS_DIR:-$HOME/projects/plotter/remote_pics}"
+
+die() { echo "remote_snap: $*" >&2; exit 1; }
+
+usage() {
+  sed -n '3,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+  exit 0
+}
+case "${1:-}" in -h|--help|help) usage ;; esac
+
+# Check every option before touching the camera. Anything else used to pass
+# straight through to remoteshoot, and chdkptp exits 0 on an unknown switch —
+# so a typo surfaced only after the shot, as "no image returned". The set and
+# value rules match plotter.pl's @SNAP_OPTS.
+bad_opt() { echo "remote_snap: $*" >&2; bad=1; }
+bad=""
+for a in "$@"; do
+  v="${a#*=}"
+  case "$a" in
+    -tv=*)    [[ "$v" =~ ^[0-9]+(\.[0-9]+)?$|^[0-9]+/[0-9]+$ ]] || bad_opt "bad value '$v' for -tv (seconds or a fraction: 8, 0.5, 1/250)" ;;
+    -av=*)    [[ "$v" =~ ^[0-9]+(\.[0-9]+)?$ ]]                 || bad_opt "bad value '$v' for -av (f-number: 2.8, 8)" ;;
+    -sv=*)    [[ "$v" =~ ^[0-9]+$ ]]                            || bad_opt "bad value '$v' for -sv (ISO: 80, 200)" ;;
+    -nd=*)    [[ "$v" =~ ^(in|out)$ ]]                          || bad_opt "bad value '$v' for -nd (in or out)" ;;
+    -focus=*) [[ "$v" =~ ^[0-9]+$ ]]                            || bad_opt "bad value '$v' for -focus (distance in mm: 400, 800)" ;;
+    -name=*)  [[ "$v" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]         || bad_opt "bad name '$v' (letters, digits, - and _ only)" ;;
+    -probe|-dark|-meter|-dng|-open) ;;
+    -tv|-av|-sv|-nd|-focus|-name) bad_opt "$a needs a value, e.g. $a=<value>" ;;
+    -probe=*|-dark=*|-meter=*|-dng=*|-open=*) bad_opt "${a%%=*} takes no value" ;;
+    *)        bad_opt "unknown option '$a'" ;;
+  esac
+done
+[ -n "$bad" ] && die "aborted — nothing sent to the camera. Options: -name= -dark -tv= -av= -sv= -nd= -focus= -dng -open -probe -meter (-h for help)"
+
+# Where is the camera? On this Mac's USB, it is driven directly. Otherwise on
+# the Pi camera host ("plotcam" in ~/.ssh/config: a Pi Zero W by the plotter
+# running the same chdkptp, see pi/README.md), driven over ssh — chdkptp runs
+# there, the frame lands in the Pi's /tmp (RAM: its card is read-only) and is
+# copied back. Canon's USB vendor id is 0x04a9 = 1193.
+PI_HOST="${PLOTCAM_HOST:-plotcam}"
+PI_TMP=/tmp/plotcam
+MODE=""
+EOS=""        # 1 = the EOS 700D (gphoto2 on the Pi), else the A570 (chdkptp)
+EOS_USB=04a9:3272
+if ioreg -p IOUSB -l -w 0 2>/dev/null | grep -q '"idVendor" = 1193'; then
+  # 0x3272 = 12914: the 700D. gphoto2 is set up on the Pi only.
+  ioreg -p IOUSB -l -w 0 2>/dev/null | grep -q '"idProduct" = 12914' &&
+    die "the EOS 700D is on this Mac's USB — plug it into $PI_HOST, where gphoto2 drives it"
+  MODE=local
+  [ -x "$CHDKPTP_DIR/chdkptp.sh" ] || die "chdkptp not found at $CHDKPTP_DIR"
+else
+  case "$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$PI_HOST" "lsusb -d $EOS_USB >/dev/null && echo eos || { lsusb -d 04a9: >/dev/null && echo chdk; }" 2>/dev/null)" in
+    eos)  MODE=pi; EOS=1 ;;
+    chdk) MODE=pi ;;
+    *)    die "no Canon camera on this Mac's USB or on $PI_HOST. EOS 700D: on $PI_HOST's USB, switched on, dial at M. A570: PLAYBACK mode, Enable Remote OFF." ;;
+  esac
+fi
+
+# ---- EOS 700D (gphoto2 on the Pi) --------------------------------------------
+# The 700D replaced the A570 on 2026-11-04. gphoto2 runs on the Pi; ONE gphoto2
+# call per shot, because each call opens a session and the camera's screen
+# blinks on every one. What the camera must have set by hand (gphoto2 cannot):
+#   - mode dial at M (in any auto mode every exposure setting reads "auto");
+#   - the lens on MF, focused on the bed (autofocus in the dark refuses to
+#     fire, and -focus=MM cannot be set on an EF lens: it is ignored);
+#   - Long exposure noise reduction OFF (else every frame is followed by a
+#     hidden dark frame as long as itself; paint takes its own).
+# Set at every shot: ISO (-sv, default 100), white balance Daylight, JPEG or
+# RAW+JPEG (-dng; the raw frame is NAME.cr2), single drive, frames to the
+# camera's RAM (the card is not written), and the camera clock from the Pi's.
+# -tv: a speed on the camera's dial is set as such; anything longer than 30 s,
+# or 1 s and over that is not on the dial, is a bulb exposure timed by gphoto2.
+# Frames are rotated by EOS_ROTATE degrees clockwise so saved frames are +x
+# right, +y up. 180 for the mount over the plotter (fov.plot, 2026-11-05: the
+# bed's front edge was at the top of the raw frame). raw_paint.py turns the
+# .cr2 by the same EOS_ROTATE.
+EOS_ROTATE="${EOS_ROTATE:-180}"
+EOS_ISO_DEFAULT=100
+EOS_SPEEDS="30 25 20 15 13 10.3 8 6.3 5 4 3.2 2.5 2 1.6 1.3 1 0.8 0.6 0.5 0.4 0.3 1/4 1/5 1/6 1/8 1/10 1/13 1/15 1/20 1/25 1/30 1/40 1/50 1/60 1/80 1/100 1/125 1/160 1/200 1/250 1/320 1/400 1/500 1/640 1/800 1/1000 1/1250 1/1600 1/2000 1/2500 1/3200 1/4000"
+EOS_APERTURES="3.5 4 4.5 5 5.6 6.3 7.1 8 9 10 11 13 14 16 18 20 22"
+EOS_ISOS="100 200 400 800 1600 3200 6400 12800"
+
+# Nearest entry of a list ($2) to a value ($1, a number or a fraction), in
+# stops. Prints "CHOICE STOPS_OFF".
+eos_nearest() {
+  python3 - "$1" "$2" <<'PY'
+import math, sys
+from fractions import Fraction
+v = float(Fraction(sys.argv[1]))
+best = min(sys.argv[2].split(), key=lambda c: abs(math.log2(float(Fraction(c)) / v)))
+print(best, "%.2f" % abs(math.log2(float(Fraction(best)) / v)))
+PY
+}
+
+# Run gphoto2 on the Pi with these arguments (each re-quoted for ssh).
+gp() {
+  local q="" a
+  for a in "$@"; do q="$q $(printf '%q' "$a")"; done
+  ssh -o BatchMode=yes "$PI_HOST" "mkdir -p $PI_TMP && gphoto2$q"
+}
+
+# The same, for a bulb exposure: gphoto2 must reach Release Full whatever
+# happens on this side. Killed with its ssh between Press Full and Release Full
+# (a paint stopped mid-frame, 2026-11-05), it left the shutter open: the camera
+# counted past 8 minutes until released by hand. So on the Pi it ignores the
+# hang-up, writes to a file there instead of down the connection, and the
+# output comes back at the end. An interrupted shot just finishes; eos_idle
+# keeps the next one waiting until it has.
+gp_bulb() {
+  local q="" a
+  for a in "$@"; do q="$q $(printf '%q' "$a")"; done
+  ssh -o BatchMode=yes "$PI_HOST" "mkdir -p $PI_TMP && trap '' HUP PIPE; gphoto2$q >$PI_TMP/bulb.log 2>&1; s=\$?; cat $PI_TMP/bulb.log; exit \$s"
+}
+
+# Close the shutter, for when a bulb exposure's gphoto2 had to be stopped.
+eos_release() { gp --set-config eosremoterelease="Release Full" --wait-event=2s >/dev/null 2>&1; }
+
+# Busy while any gphoto2 runs on the Pi (an exposure still open); no camera
+# session is opened to find out, so the screen does not blink.
+eos_idle() { ! ssh -o BatchMode=yes "$PI_HOST" 'pgrep -x gphoto2 >/dev/null' 2>/dev/null; }
+
+# A short frame, measured: the room's brightness as Bv x96 (one stop = 96),
+# the A570's light-meter scale, so plotter.pl's darkness threshold still
+# holds. 1/4 s at ISO 1600: mid-grey is then Bv -3.4 at f/3.5, so the
+# threshold (-4.2) sits inside the JPEG's range and a lit room saturates
+# well above it.
+eos_meter() {
+  local f="$PI_TMP/meter" loc
+  loc=$(mktemp -t remote_snap_meter) || die "cannot create temp file"
+  gp --set-config iso=1600 --set-config shutterspeed=1/4 --set-config whitebalance=Daylight \
+     --set-config imageformat="Smaller JPEG" --set-config capturetarget="Internal RAM" \
+     --set-config drivemode=Single --capture-image-and-download --force-overwrite \
+     --filename "$f.%C" --set-config iso=$EOS_ISO_DEFAULT >"$LOG" 2>&1
+  scp -q -o BatchMode=yes "$PI_HOST:$f.jpg" "$loc" 2>/dev/null ||
+    die "light meter shot failed: $(grep -i 'error\|focus' "$LOG" | head -1) (lens on MF?)"
+  ssh -o BatchMode=yes "$PI_HOST" "rm -f $f.jpg" 2>/dev/null
+  python3 - "$loc" <<'PY'
+import math, sys
+import numpy as np
+from PIL import Image
+im = Image.open(sys.argv[1])
+ex = im._getexif() or {}
+t, n, iso = float(ex.get(33434, 0.25)), float(ex.get(33437, 3.5)), float(ex.get(34855, 1600))
+s = np.asarray(im.convert('L'), dtype=float) / 255.0
+lin = np.where(s <= 0.04045, s / 12.92, ((s + 0.055) / 1.055) ** 2.4).mean()
+bv = math.log2(n * n / t) - math.log2(iso / 3.125) + math.log2(max(lin, 1e-5) / 0.18)
+print("bv96 %d" % round(bv * 96))
+PY
+  rm -f "$loc"
+}
+
+# The shot: settings, exposure, download, all in one gphoto2 call.
+# Arguments: the frame's base path on the Pi. Uses TV/AV/SV/DNG set below.
+eos_shoot() {
+  local pib="$1" iso="${SV:-$EOS_ISO_DEFAULT}" fmt="Large Fine JPEG" r
+  local -a opts
+  [ -n "$DNG" ] && fmt="RAW + Large Fine JPEG"
+  r=$(eos_nearest "$iso" "$EOS_ISOS"); iso="${r% *}"
+  opts=(--set-config syncdatetime=1 --set-config iso="$iso" --set-config whitebalance=Daylight
+       --set-config imageformat="$fmt" --set-config capturetarget="Internal RAM"
+       --set-config drivemode=Single)
+  if [ -n "$AV" ]; then
+    r=$(eos_nearest "$AV" "$EOS_APERTURES")
+    [ "${r#* }" != "0.00" ] && echo "remote_snap: f/$AV is not on the lens's scale — using f/${r% *}" >&2
+    opts+=(--set-config aperture="${r% *}")
+  fi
+  local bulb=""
+  if [ -n "$TV" ]; then
+    r=$(eos_nearest "$TV" "$EOS_SPEEDS")
+    # Off the dial by more than 1/20 stop: bulb for 1 s and up, nearest below.
+    if python3 -c "import sys; from fractions import Fraction as F; sys.exit(0 if float(F('$TV'))>30 or (float(F('$TV'))>=1 and ${r#* }>0.05) else 1)"; then
+      bulb=$(python3 -c "from fractions import Fraction as F; print(round(float(F('$TV'))*1000))")
+    else
+      [ "${r#* }" != "0.00" ] && echo "remote_snap: $TV s is not on the dial — using ${r% *}" >&2
+      opts+=(--set-config shutterspeed="${r% *}")
+    fi
+  fi
+  local tmo=$(( ${bulb:-0} / 1000 + 120 ))
+  if [ -n "$bulb" ]; then
+    # The shutter stays open from Press Full to Release Full; then wait for the
+    # files (JPEG, then CR2) and the camera's CAPTURECOMPLETE.
+    gp_bulb "${opts[@]}" --set-config shutterspeed=bulb --set-config eosremoterelease="Press Full" \
+       --wait-event="${bulb}ms" --set-config eosremoterelease="Release Full" \
+       --wait-event-and-download=CAPTURECOMPLETE --force-overwrite --filename "$pib.%C" \
+       >"$LOG" 2>&1 &
+  else
+    gp "${opts[@]}" --capture-image-and-download --force-overwrite --filename "$pib.%C" >"$LOG" 2>&1 &
+  fi
+  # A guard: gphoto2 waits for ever if the camera never says it is done.
+  local pid=$! t=0
+  while kill -0 $pid 2>/dev/null; do
+    sleep 1; t=$((t+1))
+    if [ $t -gt $tmo ]; then
+      ssh -o BatchMode=yes "$PI_HOST" 'pkill -x gphoto2' 2>/dev/null
+      [ -n "$bulb" ] && { sleep 1; eos_release; }
+      echo "remote_snap: gphoto2 gave no result after ${t}s — stopped it${bulb:+ and closed the shutter}" >&2
+      break
+    fi
+  done
+  wait $pid 2>/dev/null
+}
+
+# Run chdkptp with these arguments, wherever the camera is. Over ssh each
+# argument is re-quoted, so -e"luar set_clock(2026,10,3,...)" arrives intact.
+chdk() {
+  if [ "$MODE" = local ]; then
+    ( cd "$CHDKPTP_DIR" && ./chdkptp.sh "$@" )
+  else
+    local q="" a
+    for a in "$@"; do q="$q $(printf '%q' "$a")"; done
+    ssh -o BatchMode=yes "$PI_HOST" "mkdir -p $PI_TMP && cd chdkptp && ./chdkptp.sh$q"
+  fi
+}
+
+mkdir -p "$OUT_DIR" || die "cannot create $OUT_DIR"
+
+# Separate a -focus=<mm> arg (a Lua set_focus call, not a remoteshoot option)
+# from the rest. Use plain strings, not arrays: an empty array under `set -u`
+# is an "unbound variable" error on macOS's bash 3.2. remoteshoot options never
+# contain spaces, so leaving $RS_OPTS unquoted (word-split) is exactly right.
+FOCUS_MM=""
+RS_OPTS=""
+PROBE=""
+METER=""
+NAME=""
+DARK=""
+OPEN=""
+TV="" AV="" SV="" DNG=""   # the 700D's copies of -tv -av -sv -dng
+for a in "$@"; do
+  case "$a" in   # already validated above
+    -focus=*) FOCUS_MM="${a#-focus=}" ;;
+    -probe)   PROBE=1 ;;
+    -meter)   METER=1 ;;
+    -dng)     RS_OPTS="$RS_OPTS -jpg -dng"; DNG=1 ;;   # the same exposure as JPEG and as raw
+    -name=*)  NAME="${a#-name=}" ;;
+    -dark)    DARK=1 ;;
+    -open)    OPEN=1 ;;
+    -tv=*)    RS_OPTS="$RS_OPTS $a"; TV="${a#-tv=}" ;;
+    -av=*)    RS_OPTS="$RS_OPTS $a"; AV="${a#-av=}" ;;
+    -sv=*)    RS_OPTS="$RS_OPTS $a"; SV="${a#-sv=}" ;;
+    *)        RS_OPTS="$RS_OPTS $a" ;;
+  esac
+done
+if [ -n "$EOS" ]; then
+  [ -n "$FOCUS_MM" ] && echo "remote_snap: -focus is ignored on the 700D (focus by hand, lens on MF)" >&2
+  case " $* " in *" -nd="*) echo "remote_snap: -nd is ignored on the 700D (no built-in ND)" >&2 ;; esac
+fi
+LOG=$(mktemp -t remote_snap) || die "cannot create temp file"
+trap 'rm -f "$LOG"' EXIT
+
+# A previous exposure can still be running — a light-paint frame is open for
+# up to a minute, and an interrupted plotsnap leaves its remoteshoot going.
+# chdkptp then refuses every script with "a script is already running", and
+# plotsnap only found that out AFTER running the whole plot in the dark. So:
+# probe with a trivial script and wait for the camera to come free, before
+# anything is committed. -probe exposes just this check for plotsnap's
+# pre-flight; a normal shot does it too.
+camera_idle() {
+  [ -n "$EOS" ] && { eos_idle; return; }
+  # Idle only on a POSITIVE answer (the script's "N:return:1"): a busy camera
+  # says "a script is already running", and a chdkptp that could not connect
+  # says nothing useful — neither may pass as idle.
+  chdk -c -e"luar return 1" 2>&1 \
+    | grep -v 'script is already running' | grep -q ':return:1$'
+}
+wait_idle() {   # $1 = seconds to allow
+  t=0
+  while ! camera_idle; do
+    [ "$t" -ge "$1" ] && return 1
+    [ "$t" -eq 0 ] && echo "remote_snap: camera busy (an earlier exposure still running) — waiting up to $1s..." >&2
+    sleep 5; t=$((t+5))
+  done
+  return 0
+}
+IDLE_WAIT=90
+if [ -n "$PROBE" ]; then
+  wait_idle "$IDLE_WAIT" && { echo "remote_snap: camera idle"; exit 0; }
+  die "camera still busy after ${IDLE_WAIT}s — power-cycle it (playback mode, Enable Remote OFF)"
+fi
+wait_idle "$IDLE_WAIT" || die "camera still busy after ${IDLE_WAIT}s — power-cycle it (playback mode, Enable Remote OFF)"
+
+# -meter: the scene brightness from the camera's own light meter, no picture.
+# Shooting mode, half-press so it meters, read Bv (APEX x96: one stop = 96),
+# let go. The camera is in the atelier looking at the bed — exactly where
+# stray light matters — which the Mac's camera, wherever the Mac is, is not.
+# Measured 2026-10-04: lights on +156, lights off -798 (the meter's floor).
+if [ -n "$METER" ] && [ -n "$EOS" ]; then
+  eos_meter
+  exit 0
+fi
+if [ -n "$METER" ]; then
+  out=$(chdk -c -e"rec" -e'luar press("shoot_half"); local t=0; repeat sleep(10); t=t+10 until get_shooting() or t>3000; local bv=get_bv96(); release("shoot_half"); return bv' 2>&1)
+  bv=$(printf '%s\n' "$out" | sed -n -E 's/^[0-9]+:return:(-?[0-9]+)$/\1/p' | tail -1)
+  [ -n "$bv" ] || die "light meter read failed: $(printf '%s' "$out" | grep -E 'ERROR' | head -1)"
+  echo "bv96 $bv"
+  exit 0
+fi
+
+# remoteshoot always appends .jpg to the base name. "rec" may print
+# "already in rec" if a prior session left the camera in record mode — that is
+# harmless, so we judge success only by whether the image file appears.
+# set_focus only holds in MANUAL FOCUS — in AF the camera re-focuses during the
+# shot and discards the value — so -focus engages MF with set_mf(1) first
+# (verified on the A570: get_focus_mode() 0->1, distance held through the shot).
+# MF is sticky camera state, so with no -focus we set_mf(0) to put it back in
+# autofocus; otherwise a distance locked by an earlier shot silently carries
+# over into every later one.
+#
+# chdkptp exits 0 even when a command failed (an unknown remoteshoot switch
+# still gives exit 0), and says why only on stderr — so keep the output in a
+# log we can quote if no image turns up, instead of blaming the camera.
+# Named frames: NAME_NNN, numbered one past the highest NNN already present
+# for that name — not a count, so deleting a frame never reuses its number
+# (notes that cite spiral_002 stay right). Every file starting NAME_NNN counts,
+# derived ones too (_sub.png, .lat), in case the .jpeg itself was deleted.
+# -dark labels a background frame; it shares the numbering.
+next_number() {
+  local max=0 f b n
+  for f in "$OUT_DIR/${NAME}_"[0-9]*; do
+    [ -e "$f" ] || continue
+    b="${f##*/}"; n="${b#"${NAME}_"}"; n="${n%%[!0-9]*}"
+    [ -n "$n" ] && [ $((10#$n)) -gt "$max" ] && max=$((10#$n))
+  done
+  printf '%03d' $((max + 1))
+}
+if [ -n "$NAME" ]; then
+  base="$OUT_DIR/${NAME}_$(next_number)${DARK:+_dark}"
+else
+  base="$OUT_DIR/$(date +%Y%m%d%H%M%S)${DARK:+_dark}"
+fi
+
+# Set the camera clock from the Mac's at every shot: the A570 restarts at
+# 1980-01-01 on each power-on, which made the EXIF date useless — and with
+# human-readable names, the file name no longer carries the time either.
+#
+# And switch the camera's own long-exposure noise reduction OFF (CHDK
+# set_raw_nr: 0 auto, 1 off, 2 on). Left on, every exposure is followed by a
+# hidden dark frame as long as itself, so -tv=180 took ~360 s and outran
+# chdkptp's wait. Background removal is subtract_bg.py's job, with real dark
+# frames. Guarded, in case a CHDK build lacks the call.
+NR_OFF='luar if set_raw_nr then set_raw_nr(1) end'
+if [ "$MODE" = pi ]; then shot_base="$PI_TMP/${base##*/}"; else shot_base="$base"; fi
+shoot() {
+  local clk
+  clk=$(date '+%Y,%-m,%-d,%-H,%-M,%-S')
+  if [ -n "$FOCUS_MM" ]; then
+    chdk -c -e"luar set_clock($clk)" -e"rec" -e"$NR_OFF" -e"luar set_mf(1)" -e"luar set_focus($FOCUS_MM)" -e"remoteshoot $shot_base $RS_OPTS" >"$LOG" 2>&1
+  else
+    chdk -c -e"luar set_clock($clk)" -e"rec" -e"$NR_OFF" -e"luar set_mf(0)" -e"remoteshoot $shot_base $RS_OPTS" >"$LOG" 2>&1
+  fi
+  # On the Pi the frame is in its RAM: bring it home, then free the space.
+  if [ "$MODE" = pi ] && ssh -o BatchMode=yes "$PI_HOST" "test -f $shot_base.jpg" 2>/dev/null; then
+    scp -q -o BatchMode=yes "$PI_HOST:$shot_base.jpg" "$base.jpg" >>"$LOG" 2>&1
+    ssh -o BatchMode=yes "$PI_HOST" "test -f $shot_base.dng" 2>/dev/null &&
+      scp -q -o BatchMode=yes "$PI_HOST:$shot_base.dng" "$base.dng" >>"$LOG" 2>&1
+    ssh -o BatchMode=yes "$PI_HOST" "rm -f $shot_base.jpg $shot_base.dng" 2>/dev/null
+  fi
+}
+
+t0=$SECONDS
+if [ -n "$EOS" ]; then
+  # The 700D: one gphoto2 call, then the files home from the Pi's RAM.
+  eos_shoot "$shot_base"
+  if ssh -o BatchMode=yes "$PI_HOST" "test -f $shot_base.jpg" 2>/dev/null; then
+    scp -q -o BatchMode=yes "$PI_HOST:$shot_base.jpg" "$base.jpg" >>"$LOG" 2>&1
+    [ -n "$DNG" ] && scp -q -o BatchMode=yes "$PI_HOST:$shot_base.cr2" "$base.cr2" >>"$LOG" 2>&1
+  fi
+  ssh -o BatchMode=yes "$PI_HOST" "rm -f $shot_base.jpg $shot_base.cr2" 2>/dev/null
+else
+  shoot
+  # The camera auto-sleeps when idle; the first shot then returns nothing but wakes
+  # it. Retry once after a short settle before giving up — but only if the first
+  # attempt came back FAST. One that ran for minutes was a real exposure that
+  # failed (e.g. outran chdkptp's wait), and retrying it just exposes a second,
+  # empty frame after the plot has finished.
+  if [ ! -f "$base.jpg" ] && [ $((SECONDS - t0)) -lt 30 ]; then
+    sleep 2
+    shoot
+  fi
+fi
+
+# The camera is mounted 180 deg rotated above the bed, so every frame is
+# upside-down. Rotate 180 in place. jpegtran is lossless (no re-encode) and the
+# A570's 3072x2304 is MCU-aligned so no edge trim; sips is the fallback. Both
+# preserve EXIF.
+rotate180() {
+  if command -v jpegtran >/dev/null 2>&1; then
+    jpegtran -rotate 180 -copy all -outfile "$1.rot" "$1" && mv -f "$1.rot" "$1"
+  else
+    sips -r 180 "$1" >/dev/null 2>&1
+  fi
+}
+
+# ...and then neutralise EXIF Orientation. Pointing straight down, the A570's
+# tilt sensor has no gravity component to resolve roll from, so it stamps
+# Orientation=6 ("rotate 90 CW") on some frames and 1 on others — same scene,
+# same mount, and the SENSOR READOUT IS IDENTICAL EITHER WAY; only the tag
+# differs. jpegtran -copy all preserves it, so viewers that honour EXIF spun our
+# already-corrected pixels a further 90. Rotating by the tag instead would be
+# wrong for the same reason: it is noise, not a measurement. Force it to 1 and
+# let the pixels speak. Patches the 2 bytes in place (both IFDs) so the rest of
+# the EXIF — exposure, aperture, ISO — survives for readback.
+clear_exif_orientation() {
+  python3 - "$1" <<'PY' 2>/dev/null
+import struct, sys
+d = bytearray(open(sys.argv[1], 'rb').read())
+i = 2
+while i < len(d) - 4 and d[i] == 0xFF:
+    m, ln = d[i+1], struct.unpack('>H', bytes(d[i+2:i+4]))[0]
+    if m == 0xDA:
+        break
+    if m == 0xE1 and bytes(d[i+4:i+10]) == b'Exif\x00\x00':
+        t = i + 10                                  # TIFF header start
+        bo = '<' if bytes(d[t:t+2]) == b'II' else '>'
+        ifd = t + struct.unpack(bo+'I', bytes(d[t+4:t+8]))[0]
+        while 0 < ifd < len(d) - 2:                 # IFD0, then IFD1 (thumbnail)
+            n = struct.unpack(bo+'H', bytes(d[ifd:ifd+2]))[0]
+            for k in range(n):
+                e = ifd + 2 + k*12
+                if struct.unpack(bo+'H', bytes(d[e:e+2]))[0] == 0x0112:
+                    d[e+8:e+10] = struct.pack(bo+'H', 1)
+            nxt = struct.unpack(bo+'I', bytes(d[ifd+2+n*12:ifd+6+n*12]))[0]
+            ifd = t + nxt if nxt else 0
+        open(sys.argv[1], 'wb').write(d)
+        break
+    i += 2 + ln
+PY
+}
+
+if [ -f "$base.jpg" ]; then
+  mv -f "$base.jpg" "$base.jpeg"
+  if [ -z "$EOS" ]; then
+    rotate180 "$base.jpeg"
+  else
+    case "$EOS_ROTATE" in
+      0) ;;
+      90|180|270) jpegtran -rotate "$EOS_ROTATE" -copy all -outfile "$base.rot" "$base.jpeg" && mv -f "$base.rot" "$base.jpeg" ;;
+      *) echo "remote_snap: EOS_ROTATE=$EOS_ROTATE ignored (0, 90, 180 or 270)" >&2 ;;
+    esac
+  fi
+  clear_exif_orientation "$base.jpeg"
+  echo "$base.jpeg"
+  [ -n "$OPEN" ] && open "$base.jpeg"
+elif [ -n "$EOS" ]; then
+  echo "remote_snap: gphoto2 said:" >&2
+  grep -v '^$' "$LOG" | grep -iv 'waiting for\|^UNKNOWN\|PTP Property' | tail -5 | sed 's/^/  /' >&2
+  die "shot failed — 700D: dial at M? lens on MF (autofocus won't fire in the dark)? battery?"
+else
+  # Quote chdkptp's own complaint first — a rejected option or a Lua error is a
+  # usage mistake, and the camera advice below would send you chasing hardware.
+  # "already in rec" is expected noise (see above), never the reason.
+  errs=$(grep '^ERROR:' "$LOG" | grep -v 'already in rec')
+  if [ -n "$errs" ]; then
+    echo "remote_snap: chdkptp reported:" >&2
+    echo "$errs" | sed 's/^/  /' >&2
+  fi
+  die "shot failed — camera connected but no image returned (still enumerated? try re-plugging in playback mode)"
+fi

@@ -55,6 +55,10 @@ draws lettering in the Hershey single-stroke fonts (public domain, from
 A. V. Hershey, 1967), whose data is in `simplex.txt`, `scriptc.txt` and
 `scripts.txt`.
 
+The [camera](camera/) folder has `remote_snap`, which `plotter.pl`
+calls to take each photograph, and the scripts that ran on the A570
+itself before chdkptp.
+
 The rest are helpers the Python programs use: `outdirs.py`,
 `photo_hlines.py`, `rate_test.py`, `harmonograph3d.py`, `picmeta.py`
 and `undistort.py`.
