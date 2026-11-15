@@ -27,6 +27,10 @@ process using the `paint` command, to get the final look. The A570 has
 a very noisy sensor, caused by heating from its amplifier. The EOS
 700D has a much quieter sensor.
 
+Here's a small part of the process:
+
+https://github.com/user-attachments/assets/bb9a4bec-4882-4baa-9b45-8d74833646b1
+
 ## Energy density
 
 The brightness of a line in a plot depends on its exposure, which is a function of the LED brightness and the speed with which it draws. Slow lines are brighter, fast lines dimmer. This is **energy density** (ED), the amount of light energy per mm. I can determine the ED I need by looking at wedge images. 
