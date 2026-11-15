@@ -1,6 +1,6 @@
 # Code
 
-These are the Python programs behind the pictures and the process
+These are the programs behind the pictures and the process
 described in the write-up. Claude wrote them, to descriptions of what
 each picture should be.
 
@@ -38,7 +38,20 @@ writes a `.plot` file and a preview image, into `plots/` and
 | [`hue_ed.py`](hue_ed.py) | The hue map: each colour at a range of energy densities |
 | [`annotate.py`](annotate.py) | Adds lettering to a finished picture from `#@` lines in its plot file |
 
-The rest are helpers the programs above use: `outdirs.py`,
+## Running the plotter
+
+[`plotter.pl`](plotter.pl) is the Perl script that drives everything. It
+talks to the plotter's WiFi bridge, turns a small command language
+(`home`, `moveto`, `drawto`, `colour`, `speed` and so on) into G-code
+for GRBL, sets the LED's colours, and runs whole plot files. Its
+`plotsnap` and `paint` commands also take the photographs, switch the
+room lights and call the Python above to make the finished picture.
+It is the most tied to this rig of anything here: the bridge, the
+camera on a Raspberry Pi and the lights controller all have fixed
+addresses on the local network. It also loads two modules of its own,
+for SVG files and Hershey lettering, that are not included.
+
+The rest are helpers the Python programs use: `outdirs.py`,
 `photo_hlines.py`, `rate_test.py`, `harmonograph3d.py`, `picmeta.py`
 and `undistort.py`.
 
