@@ -48,8 +48,12 @@ for GRBL, sets the LED's colours, and runs whole plot files. Its
 room lights and call the Python above to make the finished picture.
 It is the most tied to this rig of anything here: the bridge, the
 camera on a Raspberry Pi and the lights controller all have fixed
-addresses on the local network. It also loads two modules of its own,
-for SVG files and Hershey lettering, that are not included.
+addresses on the local network. It needs Perl with XML::LibXML, and
+uses two modules of its own: [`PlotterSVG.pm`](PlotterSVG.pm) turns SVG
+drawings into plotter moves, and [`HersheyFont.pm`](HersheyFont.pm)
+draws lettering in the Hershey single-stroke fonts (public domain, from
+A. V. Hershey, 1967), whose data is in `simplex.txt`, `scriptc.txt` and
+`scripts.txt`.
 
 The rest are helpers the Python programs use: `outdirs.py`,
 `photo_hlines.py`, `rate_test.py`, `harmonograph3d.py`, `picmeta.py`
