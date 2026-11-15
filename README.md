@@ -29,8 +29,8 @@ on the plotter.
    drawing app for the iPad and Apple Pencil.
 5. **[Working With Claude](docs/working_with_claude.md)**: building
    and running it with an AI assistant, from the Mac and from a phone.
-6. **[Code](code/)**: the Python programs behind the pictures and the
-   process.
+6. **[Code](code/README.md)**: the programs and firmware behind the pictures,
+   [all written by Claude](code/README.md#written-by-claude).
 
 ## Contact
 
