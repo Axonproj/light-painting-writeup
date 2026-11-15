@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The plotter monitor's slideshow: the Photos album "Plotter display" to plotcam, hourly (display_sync.py). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>             <string>com.example.plotdisplay</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Frameworks/Python.framework/Versions/3.13/bin/python3</string>
+    <string>/path/to/display_sync.py</string>
+    <string>album</string>
+  </array>
+  <key>StartInterval</key>     <integer>3600</integer>
+  <key>RunAtLoad</key>         <true/>
+  <key>StandardOutPath</key>   <string>/Users/YOU/Library/Logs/plotdisplay.log</string>
+  <key>StandardErrorPath</key> <string>/Users/YOU/Library/Logs/plotdisplay.log</string>
+</dict>
+</plist>

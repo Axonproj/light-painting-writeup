@@ -1,0 +1,14 @@
+[Unit]
+Description=Pictures on the HDMI monitor while someone is in the room, dark during shots
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 -u /usr/local/bin/plotdisplay.py
+# If it stops or dies, leave the monitor dark, not lit through an exposure.
+ExecStopPost=/bin/sh -c 'echo 1 > /sys/class/graphics/fb0/blank'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

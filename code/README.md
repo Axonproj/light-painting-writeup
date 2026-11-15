@@ -59,6 +59,12 @@ The [camera](camera/) folder has `remote_snap`, which `plotter.pl`
 calls to take each photograph, and the scripts that ran on the A570
 itself before chdkptp.
 
+The [pi](pi/) folder has what runs on the two Raspberry Pis: the
+camera host by the plotter (its setup is in the README there), and a
+second Pi that shows an aquarium video on the room's monitor, and the
+newest pictures while someone is in the room, and goes dark for every
+exposure. `display_sync.py` is the computer's side of that.
+
 The rest are helpers the Python programs use: `outdirs.py`,
 `photo_hlines.py`, `rate_test.py`, `harmonograph3d.py`, `picmeta.py`
 and `undistort.py`.

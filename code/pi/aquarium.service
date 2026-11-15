@@ -1,0 +1,16 @@
+[Unit]
+Description=Aquarium video on the HDMI monitor while someone is in the room
+After=network-online.target
+Wants=network-online.target
+# The text console would otherwise share the screen.
+Conflicts=getty@tty1.service
+
+[Service]
+ExecStart=/usr/bin/python3 -u /usr/local/bin/aquarium.py
+# If it stops or dies, leave the monitor in standby.
+ExecStopPost=/bin/sh -c 'echo 1 > /sys/class/graphics/fb0/blank'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
