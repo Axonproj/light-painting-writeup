@@ -5,7 +5,8 @@ contains to the plotter. These files contain plain text like
 `moveto` and `drawto` to move the pen, `colour R G B` for the LED and
 `speed` for how fast it moves. Most of the plot files used here are
 made by Python programs written by Claude. Others are drawn or traced
-on the iPad in [PlotterDraw](the_sketching_app.md).
+on the iPad in [PlotterDraw](the_sketching_app.md). The Python is in
+the [code](../code/) folder.
 
 ## The steps
 
