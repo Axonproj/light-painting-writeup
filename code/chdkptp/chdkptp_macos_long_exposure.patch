@@ -1,0 +1,77 @@
+diff --git a/chdkptp.c b/chdkptp.c
+index 1a24dca..dac01b3 100644
+--- a/chdkptp.c
++++ b/chdkptp.c
+@@ -2178,7 +2178,7 @@ int main(int argc, char ** argv)
+ 	/* register signal handlers */
+ //	signal(SIGINT, ptpcam_siginthandler);
+ 	usb_init();
+-	lua_State *L = lua_open();
++	lua_State *L = luaL_newstate();
+ 	luaL_openlibs(L);
+ 	luaopen_lfs(L);
+ 	lbuf_open(L);
+diff --git a/include.mk b/include.mk
+index a77cc70..6c3e55e 100644
+--- a/include.mk
++++ b/include.mk
+@@ -16,7 +16,7 @@ endif
+ EXE_EXTRA=
+ 
+ CC=gcc
+-CFLAGS=-DCHDKPTP_OSTYPE=\"$(OSTYPE)\" -Wall
++CFLAGS=-DCHDKPTP_OSTYPE=\"$(OSTYPE)\" -Wall -DLUA_COMPAT_ALL -DLUA_COMPAT_APIINTCASTS
+ LDFLAGS=
+ #LD=ld
+ 
+diff --git a/lfs/lfs.c b/lfs/lfs.c
+index f46cfed..48dac0e 100644
+--- a/lfs/lfs.c
++++ b/lfs/lfs.c
+@@ -776,7 +776,7 @@ static void set_info (lua_State *L) {
+ }
+ 
+ 
+-static const struct luaL_reg fslib[] = {
++static const luaL_Reg fslib[] = {
+ 	{"attributes", file_info},
+ 	{"chdir", change_dir},
+ 	{"currentdir", get_dir},
+diff --git a/lua/chdku.lua b/lua/chdku.lua
+index 97d78dc..c0842fc 100644
+--- a/lua/chdku.lua
++++ b/lua/chdku.lua
+@@ -1049,7 +1049,7 @@ rets
+ ]]
+ function con_methods:capture_get_data(opts)
+ 	opts=util.extend_table({
+-		timeout=20000,
++		timeout=900000,  -- 15 min: long light-paint exposures (+ in-camera dark frame)
+ 	},opts)
+ 	local wait_opts=util.extend_table({rsdata=true},opts,{keys={'timeout','initwait','poll','pollstart'}})
+ 
+diff --git a/lua/cli.lua b/lua/cli.lua
+index dd09198..be12943 100644
+--- a/lua/cli.lua
++++ b/lua/cli.lua
+@@ -1576,6 +1576,11 @@ cli:add_commands{
+ 			if args.cont then
+ 				opts.cont = tonumber(args.cont)
+ 			end
++			-- Camera-side remote-capture timeout (CHDK set_usb_capture_timeout,
++			-- applied by rs_init). The camera cancels the capture -- chdkptp then
++			-- reports "remote shoot error" -- if it isn't satisfied within this;
++			-- the default cut light-paint exposures of 120 s and up. 15 min.
++			opts.cap_timeout = 900000
+ 			local opts_s = serialize(opts)
+ 			cli.dbgmsg('rs_init\n')
+ 			local status,rstatus,rerr = con:execwait('return rs_init('..opts_s..')',{libs={'rs_shoot_init'}})
+@@ -1645,7 +1650,7 @@ cli:add_commands{
+ 			-- wait for shot script to end or timeout
+ 			local wstatus,werr=con:wait_status{
+ 				run=false,
+-				timeout=30000,
++				timeout=900000,  -- 15 min: long light-paint exposures (+ in-camera dark frame)
+ 			}
+ 			if not wstatus then
+ 				warnf('error waiting for shot script %s\n',tostring(werr))

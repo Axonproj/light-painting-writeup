@@ -63,7 +63,10 @@ and `undistort.py`.
 
 The [firmware](firmware/) folder has the code for the plotter's three
 microcontrollers: the WiFi bridge, the LED pen carrier, and the
-changes to GRBL on the Arduino Nano.
+changes to GRBL on the Arduino Nano. The [chdkptp](chdkptp/) folder has
+the changes that let the computer control the Canon A570 through long
+exposures.
 
-The code is under the MIT licence, apart from the GRBL patch, which is
-GPL v3 as GRBL is: see [LICENSE](LICENSE).
+The code is under the MIT licence, apart from the two patches, which
+take their programs' licences: GPL v3 for GRBL and GPL v2 for chdkptp.
+See [LICENSE](LICENSE).
